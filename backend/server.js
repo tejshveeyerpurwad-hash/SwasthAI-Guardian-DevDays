@@ -3,8 +3,8 @@ import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';
-import sqlite3 from 'sqlite3';
-import { open } from 'sqlite';
+// Use sqlite async wrapper instead of better-sqlite3
+import db from './db.js';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import axios from 'axios';
@@ -18,21 +18,10 @@ const __dirname = path.dirname(__filename);
 
 dotenv.config();
 
-if (cluster.isPrimary) {
-  const numCPUs = os.cpus().length;
-  console.log(`Primary ${process.pid} is running. Forking ${numCPUs} workers for load balancing...`);
+// Simple single-process server (no clustering)
+const app = express();
+const PORT = process.env.PORT || 5002;
 
-  for (let i = 0; i < numCPUs; i++) {
-    cluster.fork();
-  }
-
-  cluster.on('exit', (worker, code, signal) => {
-    console.log(`worker ${worker.process.pid} died. Restarting...`);
-    cluster.fork();
-  });
-} else {
-  const app = express();
-  const PORT = process.env.PORT || 5000;
   // Support persistent disk on Render/Railway
   const DATA_DIR = process.env.DATA_DIR || '.';
   const DB_PATH = path.join(DATA_DIR, 'swasth_guardian.sqlite');
@@ -68,151 +57,7 @@ if (cluster.isPrimary) {
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: 'Too many login attempts. Please try again in 15 minutes.' },
-  });
-
-  // --- DATABASE INITIALIZATION ---
-  let db;
-  (async () => {
-    db = await open({
-      filename: DB_PATH,
-      driver: sqlite3.Database
-    });
-
-    // --- DATABASE INITIALIZATION ---
-    await db.exec('PRAGMA journal_mode=WAL');
-
-    // Table Creation
-    await db.exec(`
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      phone TEXT UNIQUE,
-      email TEXT UNIQUE,
-      username TEXT,
-      name TEXT,
-      password TEXT,
-      role TEXT,
-      villageId TEXT
-    );
-    CREATE TABLE IF NOT EXISTS otps (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      phone TEXT,
-      otp TEXT,
-      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE TABLE IF NOT EXISTS village_health (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      villageId TEXT UNIQUE,
-      name TEXT,
-      population INTEGER,
-      pregnant_women INTEGER,
-      children_under_5 INTEGER,
-      malnutrition_cases INTEGER,
-      asha_contact TEXT,
-      outbreakAlert TEXT DEFAULT NULL,
-      lastUpdated DATETIME DEFAULT NULL
-    );
-    CREATE TABLE IF NOT EXISTS pregnancy_data (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT,
-      age INTEGER,
-      trimester INTEGER,
-      dueDate TEXT,
-      riskLevel TEXT,
-      villageId TEXT
-    );
-    CREATE TABLE IF NOT EXISTS malnutrition_data (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      childName TEXT,
-      ageMonths INTEGER,
-      weight REAL,
-      height REAL,
-      status TEXT,
-      villageId TEXT
-    );
-    CREATE TABLE IF NOT EXISTS symptoms (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      userId INTEGER,
-      villageId TEXT,
-      symptoms TEXT,
-      prediction TEXT,
-      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE TABLE IF NOT EXISTS skin_logs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      userId INTEGER,
-      villageId TEXT,
-      condition TEXT,
-      severity TEXT,
-      rednessPercent INTEGER,
-      irregularPercent INTEGER,
-      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE TABLE IF NOT EXISTS ambulance_requests (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER,
-      name TEXT,
-      location TEXT,
-      priority TEXT,
-      type TEXT DEFAULT 'emergency',
-      symptoms TEXT,
-      status TEXT DEFAULT 'pending',
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE TABLE IF NOT EXISTS ngo_reports (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      title TEXT,
-      content TEXT,
-      villageId TEXT,
-      date TEXT
-    );
-
-    -- ── PERFORMANCE INDEXES ───────────────────────────────────────────────────
-    -- Added V2: Prevents full table scans on the most-queried columns.
-    -- Critical for outbreak detection (village + time), symptom lookups (userId), and ambulance feeds.
-    CREATE INDEX IF NOT EXISTS idx_symptoms_villageId    ON symptoms(villageId);
-    CREATE INDEX IF NOT EXISTS idx_symptoms_userId       ON symptoms(userId);
-    CREATE INDEX IF NOT EXISTS idx_symptoms_createdAt    ON symptoms(createdAt);
-    CREATE INDEX IF NOT EXISTS idx_ambulance_userId      ON ambulance_requests(user_id);
-    CREATE INDEX IF NOT EXISTS idx_ambulance_status      ON ambulance_requests(status);
-    CREATE INDEX IF NOT EXISTS idx_pregnancy_villageId   ON pregnancy_data(villageId);
-    CREATE INDEX IF NOT EXISTS idx_malnutrition_villageId ON malnutrition_data(villageId);
-  `);
-
-
-    // --- AUTO-MIGRATION HELPER ---
-    // Hardens the database against schema changes by automatically adding missing columns
-    const migrateSchema = async () => {
-      const migrations = {
-        ambulance_requests: [
-          { name: 'user_id', type: 'INTEGER' },
-          { name: 'type', type: "TEXT DEFAULT 'emergency'" },
-          { name: 'created_at', type: 'DATETIME DEFAULT CURRENT_TIMESTAMP', legacy: 'createdAt' }
-        ],
-        village_health: [
-          { name: 'outbreakAlert', type: 'TEXT DEFAULT NULL' },
-          { name: 'lastUpdated', type: 'DATETIME DEFAULT NULL' }
-        ]
-      };
-
-      for (const [table, columns] of Object.entries(migrations)) {
-        try {
-          const tableInfo = await db.all(`PRAGMA table_info(${table})`);
-          const existing = tableInfo.map(c => c.name);
-          for (const col of columns) {
-            if (!existing.includes(col.name)) {
-              if (col.legacy && existing.includes(col.legacy)) {
-                await db.exec(`ALTER TABLE ${table} RENAME COLUMN ${col.legacy} TO ${col.name}`);
-                console.log(`[MIGRATION] Renamed ${table}.${col.legacy} to ${col.name}`);
-              } else {
-                await db.exec(`ALTER TABLE ${table} ADD COLUMN ${col.name} ${col.type}`);
-                console.log(`[MIGRATION] Added column ${col.name} to ${table}`);
-              }
-            }
-          }
-        } catch (err) { console.error(`Migration error on ${table}:`, err.message); }
-      }
-    };
-    await migrateSchema();
+  });// MockDB initialized above; no async setup needed
 
     console.log('--- SwasthAI Guardian Core: SQLite Database Initialized & Migrated ---');
 
@@ -234,6 +79,43 @@ if (cluster.isPrimary) {
       }
       next();
     };
+
+    // --- DEMO DATA SEEDING ---
+    async function seedDemoData() {
+      console.log('🌱 Seeding SwasthAI Guardian Demo Data into InMemoryDB...');
+      const villageNames = ['Palghar-1', 'Dahanu-East', 'Wada-North', 'Jawhar-Central', 'Vikramgad-South'];
+      for (let i = 0; i < 25; i++) {
+        const vName = villageNames[i % villageNames.length] + '-' + i;
+        await db.run(
+          `INSERT INTO village_health (villageId, name, population, pregnant_women, children_under_5, malnutrition_cases, asha_contact) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [`V-${100+i}`, vName, Math.floor(Math.random() * 5000) + 1000, Math.floor(Math.random() * 50) + 10, Math.floor(Math.random() * 200) + 50, Math.floor(Math.random() * 20), '9876543210']
+        );
+      }
+      const defaultPassword = await bcrypt.hash('admin123', 10);
+      await db.run(`INSERT INTO users (phone, username, name, password, role, villageId) VALUES (?, ?, ?, ?, ?, ?)`, ['admin', 'admin', 'District Admin', defaultPassword, 'admin', 'ALL']);
+      await db.run(`INSERT INTO users (phone, username, name, password, role, villageId) VALUES (?, ?, ?, ?, ?, ?)`, ['ngo', 'ngo_officer', 'NGO Coordinator', defaultPassword, 'ngo', 'ALL']);
+      await db.run(`INSERT INTO users (phone, username, name, password, role, villageId) VALUES (?, ?, ?, ?, ?, ?)`, ['asha', 'sunita_devi', 'Sunita Devi', defaultPassword, 'asha', 'V-100']);
+      await db.run(`INSERT INTO users (phone, username, name, password, role, villageId) VALUES (?, ?, ?, ?, ?, ?)`, ['villager', 'ramesh', 'Ramesh', defaultPassword, 'villager', 'V-100']);
+      
+      for (let i = 0; i < 1000; i++) {
+        const village = `V-${100 + (i % 25)}`;
+        await db.run('INSERT INTO symptoms (userId, villageId, symptoms, prediction) VALUES (?, ?, ?, ?)', [1, village, 'Fever', 'Viral Fever']);
+      }
+      for (let i = 0; i < 250; i++) {
+        const riskLevels = ['Low Risk', 'Low Risk', 'Low Risk', 'Mid Risk', 'High Risk'];
+        const risk = riskLevels[Math.floor(Math.random() * riskLevels.length)];
+        const village = `V-${100 + (i % 25)}`;
+        await db.run('INSERT INTO pregnancy_data (name, age, trimester, dueDate, riskLevel, villageId) VALUES (?, ?, ?, ?, ?, ?)', [`Mother-${i}`, 25, 2, '2026-08-15', risk, village]);
+      }
+      for (let i = 0; i < 50; i++) {
+        const village = `V-${100 + (i % 25)}`;
+        await db.run('INSERT INTO ambulance_requests (user_id, name, location, priority, symptoms, status) VALUES (?, ?, ?, ?, ?, ?)', [1, `Victim-${i}`, village, 'Critical', 'Emergency', 'pending']);
+      }
+      console.log('✅ Demo Data Seeded! 1000 Patients, 250 Pregnancies, 50 Emergencies.');
+    }
+    
+    // Seed in background
+    seedDemoData().catch(console.error);
 
     // --- ROUTES ---
 
@@ -662,6 +544,100 @@ if (cluster.isPrimary) {
         res.json({ symptoms, ambulances });
       } catch (err) {
         res.status(500).json({ error: 'Failed to fetch history.' });
+      }
+    });
+
+    // --- AI HEALTH AGENT ---
+    app.post('/api/agent/message', auth, async (req, res) => {
+      const { sessionId: reqSessionId, message, language = 'en' } = req.body;
+      const userId = req.user.id;
+      const villageId = req.user.villageId || 'Unknown';
+      
+      try {
+        let sessionId = reqSessionId;
+        
+        // 1. Create session if it doesn't exist
+        if (!sessionId) {
+          sessionId = 'sess_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5);
+          await db.run(
+            'INSERT INTO health_agent_sessions (id, userId, villageId, language) VALUES (?, ?, ?, ?)',
+            [sessionId, userId, villageId, language]
+          );
+        }
+
+        // 2. Fetch history
+        const rawHistory = await db.all(
+          'SELECT role, content FROM health_agent_messages WHERE sessionId = ? ORDER BY id ASC',
+          [sessionId]
+        );
+        
+        // 3. Save user message
+        await db.run(
+          'INSERT INTO health_agent_messages (sessionId, role, content) VALUES (?, ?, ?)',
+          [sessionId, 'user', message]
+        );
+        
+        // 4. Call AI Service
+        const AI_URL = process.env.AI_SERVICE_URL || 'http://127.0.0.1:8000';
+        const aiPayload = {
+          session_id: sessionId,
+          message: message,
+          history: rawHistory,
+          language: language
+        };
+        
+        const aiRes = await axios.post(`${AI_URL}/ai/health-agent`, aiPayload, { timeout: 15000 });
+        const { reply, risk_level, risk_score, follow_up_questions, actions, is_emergency } = aiRes.data;
+        
+        // 5. Save AI response
+        await db.run(
+          'INSERT INTO health_agent_messages (sessionId, role, content, riskLevel, followUpQuestions, actions) VALUES (?, ?, ?, ?, ?, ?)',
+          [sessionId, 'agent', reply, risk_level, JSON.stringify(follow_up_questions), JSON.stringify(actions)]
+        );
+        
+        // 6. Update Session
+        await db.run(
+          'UPDATE health_agent_sessions SET riskLevel = ?, riskScore = ?, updatedAt = datetime("now") WHERE id = ?',
+          [risk_level, risk_score, sessionId]
+        );
+        
+        // 7. Emergency Escalation
+        if (is_emergency) {
+          await db.run(
+            'INSERT INTO ambulance_requests (user_id, name, location, priority, symptoms, type) VALUES (?, ?, ?, ?, ?, ?)',
+            [userId, req.user.name || 'AI Auto-Escalation', villageId, 'Critical', message, 'Agent Escalation']
+          );
+          await db.run('UPDATE health_agent_sessions SET ashaAlerted = 1 WHERE id = ?', [sessionId]);
+        }
+        
+        res.send({
+          sessionId,
+          response: reply,
+          riskLevel: risk_level,
+          riskScore: risk_score,
+          followUpQuestions: follow_up_questions,
+          actions: actions,
+          isEmergency: is_emergency
+        });
+      } catch (err) {
+        console.error('[AI Agent Error]', err.message);
+        res.status(503).send({ error: 'AI Agent is currently unavailable. Please try again later.' });
+      }
+    });
+
+    app.get('/api/agent/session/:sessionId', auth, async (req, res) => {
+      try {
+        const messages = await db.all(
+          'SELECT role, content, riskLevel, followUpQuestions, actions, createdAt FROM health_agent_messages WHERE sessionId = ? ORDER BY id ASC',
+          [req.params.sessionId]
+        );
+        res.send({ messages: messages.map(m => ({
+          ...m,
+          followUpQuestions: m.followUpQuestions ? JSON.parse(m.followUpQuestions) : [],
+          actions: m.actions ? JSON.parse(m.actions) : []
+        }))});
+      } catch (err) {
+        res.status(500).send({ error: 'Failed to load session history' });
       }
     });
 
@@ -1135,5 +1111,4 @@ CRITICAL CLINICAL & TRANSLATION SAFEGUARDS:
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`🚀 SwasthAI Core active on port ${PORT} (Mode: ${process.env.NODE_ENV || 'development'})`);
     });
-  })();
-}
+

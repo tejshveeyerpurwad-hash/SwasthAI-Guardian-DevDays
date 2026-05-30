@@ -234,6 +234,7 @@ def predict_disease_local(text: str) -> str:
 # RAG & Agentic imports
 from rag_service import rag_chat
 from outbreak_agent import start_agent_background, get_recent_outbreaks
+from health_agent import run_health_agent
 
 app = FastAPI(title="SwasthAI Guardian: AI Hub")
 
@@ -318,6 +319,12 @@ class MalnutritionInput(BaseModel):
 
 class ChatInput(BaseModel):
     message: str
+
+class HealthAgentInput(BaseModel):
+    session_id: str
+    message: str
+    history: list[dict]
+    language: str = "en"
 
 # ── ENDPOINT 1: Disease Prediction ────────────────────────────────────────────
 @app.post("/predict/disease")
@@ -518,6 +525,24 @@ async def rag_sakhi_chat(data: ChatInput):
 async def get_outbreak_alerts(limit: int = 10):
     """Returns recent confirmed outbreak events detected by the Agentic Monitor."""
     return {"outbreaks": get_recent_outbreaks(limit)}
+
+# ── ENDPOINT 7: AI Health Agent (NEW) ────────────────────────────────────────
+@app.post("/ai/health-agent")
+async def ai_health_agent_endpoint(data: HealthAgentInput):
+    """Conversational Health Agent with risk scoring and ASHA escalation."""
+    groq_key = os.getenv("GROQ_API_KEY", "")
+    try:
+        result = run_health_agent(
+            session_id=data.session_id,
+            user_message=data.message,
+            conversation_history=data.history,
+            language=data.language,
+            groq_api_key=groq_key
+        )
+        return result
+    except Exception as e:
+        print(f"[Health Agent Error] {e}")
+        raise HTTPException(status_code=500, detail="Health Agent error")
 
 # ── HEALTH CHECK ──────────────────────────────────────────────────────────────
 @app.get("/health")

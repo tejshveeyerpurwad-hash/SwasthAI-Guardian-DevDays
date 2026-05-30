@@ -10,16 +10,8 @@
  *   Admin:    email=admin@swasthai.in, password=Demo@1234, role=admin
  */
 
-import sqlite3pkg from 'sqlite3';
-import bcrypt from 'bcryptjs';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-const sqlite3 = sqlite3pkg;
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-const DB_PATH = path.resolve(__dirname, 'swasth_guardian.sqlite');
-const db = new sqlite3.Database(DB_PATH);
+import MockDB from './db.js';
+const db = new MockDB();
 
 const DEMO_PASSWORD = 'Demo@1234';
 

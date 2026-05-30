@@ -4,7 +4,7 @@
  * Safe to run multiple times — detects already-hashed passwords and skips them.
  * Run with: node seeds/migrate_passwords.js
  */
-import sqlite3 from 'sqlite3';
+
 import { open } from 'sqlite';
 import bcrypt from 'bcryptjs';
 import path from 'path';
